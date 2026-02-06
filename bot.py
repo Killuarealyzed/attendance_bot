@@ -664,7 +664,7 @@ async def process_start_date(message: Message, state: FSMContext):
     
     await state.update_data(start_date=result)
     await message.answer(
-        "📅 Укажи дату окончания отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
+        "📅 Укажи дату окончания отсутствия (ДД.ММ.ГГГГ):",
         reply_markup=get_cancel_kb()
     )
     await state.set_state(AttendanceForm.waiting_for_end_date)
