@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, FSInputFile
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -74,7 +74,6 @@ def parse_date(date_str: str) -> datetime:
     if len(parts) == 2:
         day, month = int(parts[0]), int(parts[1])
         year = datetime.now().year
-        # Если дата уже прошла в этом году - берем следующий год
         if datetime(year, month, day) < datetime.now():
             year += 1
     else:
@@ -162,7 +161,6 @@ def init_db():
             )
         ''')
         
-        # Новая таблица для периодов отсутствия
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS absence_periods (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,7 +173,6 @@ def init_db():
             )
         ''')
         
-        # Миграция username
         cursor.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in cursor.fetchall()]
         if 'username' not in columns:
@@ -318,7 +315,7 @@ def get_main_kb():
             [KeyboardButton(text="📆 Отсутствую с... по...")]
         ],
         resize_keyboard=True,
-        one_time_keyboard=False  # Кнопки всегда видны
+        one_time_keyboard=False
     )
 
 def get_cancel_kb():
@@ -355,331 +352,19 @@ def is_user_absent_today(user_id: int, today: str) -> bool:
     except:
         return False
 
-# ===== ХЕНДЛЕРЫ =====
-@router.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    username = message.from_user.username
-    
-    try:
-        conn = sqlite3.connect('attendance.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, username FROM users WHERE user_id = ?", (user_id,))
-        user = cursor.fetchone()
-        
-        if user and username != user[1]:
-            cursor.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
-            conn.commit()
-        conn.close()
-    except Exception as e:
-        await message.answer(f"❌ Ошибка базы данных: {e}")
-        return
-
-    if user:
-        await message.answer(
-            f"👋 Привет, {user[0]}!\n\nВыбери действие:",
-            reply_markup=get_main_kb()
-        )
-        # Состояние НЕ устанавливается — пользователь свободен в выборе действий
-    else:
-        await message.answer("👋 Представься (ФИО или имя):", reply_markup=ReplyKeyboardRemove())
-        await state.set_data({"username": username})
-        await state.set_state(AttendanceForm.waiting_for_name)
-
-@router.message(AttendanceForm.waiting_for_name)
-async def process_name(message: Message, state: FSMContext):
-    name = message.text.strip()
-    if len(name) < 2:
-        await message.answer("❌ Слишком короткое имя. Попробуй ещё:")
-        return
-    
-    user_id = message.from_user.id
-    username = message.from_user.username or (await state.get_data()).get("username")
-    
-    try:
-        conn = sqlite3.connect('attendance.db')
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO users (user_id, name, username) VALUES (?, ?, ?)", (user_id, name, username))
-        conn.commit()
-        conn.close()
-        ensure_user_in_excel(user_id, name, username)
-    except Exception as e:
-        await message.answer(f"❌ Ошибка сохранения: {e}")
-        return
-    
-    await message.answer(
-        f"✅ Привет, {name}!\n\nВыбери действие:",
-        reply_markup=get_main_kb()
+# ===== ХЕНДЛЕРЫ КОМАНД (ОБЯЗАТЕЛЬНО В НАЧАЛЕ!) =====
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    help_text = (
+        "ℹ️ Команды:\n"
+        "/start — начать диалог\n"
+        "/history — история отсутствий\n"
+        "/absence — активные периоды отсутствия\n"
+        "/clear_absence — удалить периоды\n"
+        "/journal — получить Excel-журнал (админ)\n\n"
+        "📅 Учебные дни: понедельник-суббота"
     )
-    # Состояние НЕ устанавливается
-
-# ===== ГЛОБАЛЬНЫЙ ХЕНДЛЕР ДЛЯ ОТМЕТКИ =====
-@router.message(lambda message: message.text == "📝 Отметиться")
-async def handle_mark_attendance(message: Message, state: FSMContext):
-    """Обрабатывает кнопку 'Отметиться' из любого состояния"""
-    user_id = message.from_user.id
-    
-    try:
-        conn = sqlite3.connect('attendance.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM users WHERE user_id = ?", (user_id,))
-        user = cursor.fetchone()
-        conn.close()
-        
-        if not user:
-            await message.answer("Сначала представьтесь! Нажмите /start")
-            return
-            
-        await message.answer(
-            f"Выбери свой статус на сегодня:",
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[
-                    [KeyboardButton(text="✅ Буду"), KeyboardButton(text="❌ Не буду")]
-                ],
-                resize_keyboard=True,
-                one_time_keyboard=True
-            )
-        )
-        await state.set_state(AttendanceForm.waiting_for_attendance)
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-# ===== ГЛОБАЛЬНЫЙ ХЕНДЛЕР ДЛЯ ПЕРИОДА ОТСУТСТВИЯ =====
-@router.message(lambda message: message.text == "📆 Отсутствую с... по...")
-async def handle_absence_period(message: Message, state: FSMContext):
-    """Обрабатывает кнопку 'Отсутствую с... по...' из любого состояния"""
-    user_id = message.from_user.id
-    
-    try:
-        conn = sqlite3.connect('attendance.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM users WHERE user_id = ?", (user_id,))
-        user = cursor.fetchone()
-        conn.close()
-        
-        if not user:
-            await message.answer("Сначала представьтесь! Нажмите /start")
-            return
-            
-        await message.answer(
-            "📅 Укажи дату начала отсутствия (ДД.ММ.ГГГГ):",
-            reply_markup=get_cancel_kb()
-        )
-        await state.set_state(AttendanceForm.waiting_for_start_date)
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-@router.message(AttendanceForm.waiting_for_attendance)
-async def process_attendance(message: Message, state: FSMContext):
-    today = datetime.now().strftime("%d.%m.%Y")
-    
-    if message.text == "✅ Буду":
-        user_id = message.from_user.id
-        update_attendance_in_excel(user_id, today, "✅")
-        await message.answer("👍 Отлично! Хороших пар! 📚", reply_markup=get_main_kb())
-        await state.clear()
-        return
-        
-    elif message.text == "❌ Не буду":
-        await message.answer(
-            "📅 Укажи дату отсутствия (ДД.ММ.ГГГГ):",
-            reply_markup=get_cancel_kb()
-        )
-        await state.set_state(AttendanceForm.waiting_for_date)
-        return
-        
-    elif message.text == "📆 Отсутствую с... по...":
-        await message.answer(
-            "📅 Укажи дату начала отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
-            reply_markup=get_cancel_kb()
-        )
-        await state.set_state(AttendanceForm.waiting_for_start_date)
-        return
-        
-    elif message.text == "🚫 Отмена":
-        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
-        await state.clear()
-        return
-        
-    await message.answer("❓ Используй кнопки 👇", reply_markup=get_main_kb())
-
-# ===== ОБРАБОТКА ПЕРИОДА ОТСУТСТВИЯ =====
-@router.message(AttendanceForm.waiting_for_start_date)
-async def process_start_date(message: Message, state: FSMContext):
-    if message.text == "🚫 Отмена":
-        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
-        await state.clear()
-        return
-    
-    is_valid, result = validate_and_normalize_date(message.text)
-    if not is_valid:
-        await message.answer(f"❌ {result}\nПопробуй ещё:")
-        return
-    
-    await state.update_data(start_date=result)
-    await message.answer(
-        "📅 Укажи дату окончания отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
-        reply_markup=get_cancel_kb()
-    )
-    await state.set_state(AttendanceForm.waiting_for_end_date)
-
-@router.message(AttendanceForm.waiting_for_end_date)
-async def process_end_date(message: Message, state: FSMContext):
-    if message.text == "🚫 Отмена":
-        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
-        await state.clear()
-        return
-    
-    is_valid, result = validate_and_normalize_date(message.text)
-    if not is_valid:
-        await message.answer(f"❌ {result}\nПопробуй ещё:")
-        return
-    
-    data = await state.get_data()
-    start_date = data['start_date']
-    
-    # Проверяем, что дата окончания >= даты начала
-    try:
-        start_dt = datetime.strptime(start_date, "%d.%m.%Y")
-        end_dt = datetime.strptime(result, "%d.%m.%Y")
-        if end_dt < start_dt:
-            await message.answer("❌ Дата окончания не может быть раньше даты начала!\nУкажи корректную дату окончания:")
-            return
-    except:
-        await message.answer("❌ Ошибка при сравнении дат. Попробуй ещё:")
-        return
-    
-    await state.update_data(end_date=result)
-    await message.answer("✏️ Укажи причину отсутствия (болезнь, отпуск и т.д.):", reply_markup=get_cancel_kb())
-    await state.set_state(AttendanceForm.waiting_for_absence_reason)
-
-@router.message(AttendanceForm.waiting_for_absence_reason)
-async def process_absence_reason(message: Message, state: FSMContext):
-    if message.text == "🚫 Отмена":
-        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
-        await state.clear()
-        return
-    
-    reason = message.text.strip()
-    user_id = message.from_user.id
-    data = await state.get_data()
-    start_date = data['start_date']
-    end_date = data['end_date']
-    
-    try:
-        # Сохраняем период в БД
-        conn = sqlite3.connect('attendance.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, username FROM users WHERE user_id = ?", (user_id,))
-        user_row = cursor.fetchone()
-        if not user_row:
-            conn.close()
-            await message.answer("❌ Ошибка: пользователь не найден в базе.")
-            await state.clear()
-            return
-        
-        user_name, user_username = user_row
-        cursor.execute(
-            "INSERT INTO absence_periods (user_id, start_date, end_date, reason) VALUES (?, ?, ?, ?)",
-            (user_id, start_date, end_date, reason)
-        )
-        conn.commit()
-        conn.close()
-        
-        # Обновляем Excel для всех дней в периоде
-        date_range = get_date_range(
-            datetime.strptime(start_date, "%d.%m.%Y"),
-            datetime.strptime(end_date, "%d.%m.%Y")
-        )
-        
-        for date_str in date_range:
-            update_attendance_in_excel(user_id, date_str, "❌", reason)
-        
-        # Отправляем уведомление админу
-        username_display = f" (@{user_username})" if user_username else ""
-        admin_message = (
-            f"📅 ПЕРИОД ОТСУТСТВИЯ\n\n"
-            f"👤 {user_name}{username_display} (ID: {user_id})\n"
-            f"📆 С {start_date} по {end_date}\n"
-            f"📝 Причина: {reason}"
-        )
-        await bot.send_message(ADMIN_CHAT_ID, admin_message)
-        
-        await message.answer(
-            f"✅ Записал период отсутствия:\n"
-            f"📆 С {start_date} по {end_date}\n"
-            f"📝 Причина: {reason}\n\n"
-            f"Бот не будет беспокоить вас в эти дни!",
-            reply_markup=get_main_kb()
-        )
-        await state.clear()
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка сохранения периода: {e}")
-        await state.clear()
-
-# ===== ОСТАЛЬНЫЕ ХЕНДЛЕРЫ =====
-@router.message(AttendanceForm.waiting_for_date)
-async def process_date(message: Message, state: FSMContext):
-    if message.text == "🚫 Отмена":
-        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
-        await state.clear()
-        return
-    
-    is_valid, result = validate_and_normalize_date(message.text)
-    if not is_valid:
-        await message.answer(f"❌ {result}\nПопробуй ещё:")
-        return
-    
-    await state.update_data(date=result)
-    await message.answer("✏️ Причина отсутствия? Напиши «-» если нет:", reply_markup=get_cancel_kb())
-    await state.set_state(AttendanceForm.waiting_for_reason)
-
-@router.message(AttendanceForm.waiting_for_reason)
-async def process_reason(message: Message, state: FSMContext):
-    if message.text == "🚫 Отмена":
-        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
-        await state.clear()
-        return
-    
-    reason = None if message.text.strip() in ["-", ""] else message.text.strip()
-    user_id = message.from_user.id
-    data = await state.get_data()
-    date = data['date']
-    
-    try:
-        conn = sqlite3.connect('attendance.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, username FROM users WHERE user_id = ?", (user_id,))
-        user_row = cursor.fetchone()
-        if not user_row:
-            conn.close()
-            await message.answer("❌ Ошибка: пользователь не найден в базе.")
-            await state.clear()
-            return
-        
-        user_name, user_username = user_row
-        cursor.execute("INSERT INTO absences (user_id, date, reason) VALUES (?, ?, ?)", (user_id, date, reason))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        await message.answer(f"❌ Ошибка сохранения: {e}")
-        await state.clear()
-        return
-    
-    update_attendance_in_excel(user_id, date, "❌", reason)
-    
-    username_display = f" (@{user_username})" if user_username else ""
-    reason_text = f"\n📝 Причина: {reason}" if reason else ""
-    await bot.send_message(
-        ADMIN_CHAT_ID,
-        f"⚠️ Отсутствие\n👤 {user_name}{username_display} (ID: {user_id})\n📅 {date}{reason_text}"
-    )
-    
-    await message.answer(f"✅ Записал отсутствие на {date}.", reply_markup=get_main_kb())
-    await state.clear()
+    await message.answer(help_text)
 
 @router.message(Command("history"))
 async def cmd_history(message: Message):
@@ -757,7 +442,6 @@ async def cmd_clear_absence(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка удаления: {e}")
 
-# ===== КОМАНДА ДЛЯ АДМИНА: получить Excel =====
 @router.message(Command("journal"))
 async def cmd_journal(message: Message):
     if message.from_user.id != ADMIN_CHAT_ID:
@@ -774,27 +458,307 @@ async def cmd_journal(message: Message):
             wb.save(EXCEL_FILE)
         
         document = FSInputFile(EXCEL_FILE, filename="Журнал_посещаемости.xlsx")
-        await message.answer_document(document, caption="📊 Актуальный журнал посещаемости (пн-сб)")
+        await message.answer_document(document, caption="📊 Актуальный журнал посещаемости")
     except Exception as e:
         await message.answer(f"❌ Ошибка отправки файла: {e}")
         import traceback
         traceback.print_exc()
 
-@router.message(Command("help"))
-async def cmd_help(message: Message):
-    help_text = (
-        "ℹ️ Команды:\n"
-        "/start — начать диалог\n"
-        "/history — история отсутствий\n"
-        "/absence — активные периоды отсутствия\n"
-        "/clear_absence — удалить периоды отсутствия\n"
-        "/help — эта справка\n\n"
-        "⏰ Каждый день в 20:00 бот спрашивает о завтрашних парах\n\n"
-        "👨‍🏫 Админ команды:\n"
-        "/journal — получить Excel-журнал\n\n"
-        "📅 Учебные дни: понедельник-суббота"
+# ===== ХЕНДЛЕР /start (только при команде) =====
+@router.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    username = message.from_user.username
+    
+    try:
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, username FROM users WHERE user_id = ?", (user_id,))
+        user = cursor.fetchone()
+        
+        if user and username != user[1]:
+            cursor.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        await message.answer(f"❌ Ошибка базы данных: {e}")
+        return
+
+    if user:
+        await message.answer(
+            f"👋 Привет, {user[0]}!\n\nВыбери действие:",
+            reply_markup=get_main_kb()
+        )
+        await state.clear()  # ← КРИТИЧЕСКИ ВАЖНО!
+    else:
+        await message.answer("👋 Представься (ФИО или имя):", reply_markup=ReplyKeyboardRemove())
+        await state.set_data({"username": username})
+        await state.set_state(AttendanceForm.waiting_for_name)
+
+# ===== ГЛОБАЛЬНЫЙ ХЕНДЛЕР ДЛЯ КНОПОК (только если состояние пустое) =====
+@router.message(
+    lambda message: message.text in ["📝 Отметиться", "📆 Отсутствую с... по..."],
+    StateFilter(None)  # ← Только если состояние не установлено
+)
+async def handle_buttons(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    try:
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM users WHERE user_id = ?", (user_id,))
+        user = cursor.fetchone()
+        conn.close()
+        
+        if not user:
+            await message.answer("Сначала представьтесь! Нажмите /start")
+            return
+            
+        if message.text == "📝 Отметиться":
+            await message.answer(
+                "Выбери свой статус на сегодня:",
+                reply_markup=ReplyKeyboardMarkup(
+                    keyboard=[
+                        [KeyboardButton(text="✅ Буду"), KeyboardButton(text="❌ Не буду")]
+                    ],
+                    resize_keyboard=True,
+                    one_time_keyboard=True
+                )
+            )
+            await state.set_state(AttendanceForm.waiting_for_attendance)
+            
+        elif message.text == "📆 Отсутствую с... по...":
+            await message.answer(
+                "📅 Укажи дату начала отсутствия (ДД.ММ.ГГГГ):",
+                reply_markup=get_cancel_kb()
+            )
+            await state.set_state(AttendanceForm.waiting_for_start_date)
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+# ===== ХЕНДЛЕРЫ FSM (обработка состояний) =====
+@router.message(AttendanceForm.waiting_for_name)
+async def process_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if len(name) < 2:
+        await message.answer("❌ Слишком короткое имя. Попробуй ещё:")
+        return
+    
+    user_id = message.from_user.id
+    username = message.from_user.username or (await state.get_data()).get("username")
+    
+    try:
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO users (user_id, name, username) VALUES (?, ?, ?)", (user_id, name, username))
+        conn.commit()
+        conn.close()
+        ensure_user_in_excel(user_id, name, username)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка сохранения: {e}")
+        return
+    
+    await message.answer(
+        f"✅ Привет, {name}!\n\nВыбери действие:",
+        reply_markup=get_main_kb()
     )
-    await message.answer(help_text)
+    await state.clear()  # ← Сбрасываем состояние после регистрации
+
+@router.message(AttendanceForm.waiting_for_attendance)
+async def process_attendance(message: Message, state: FSMContext):
+    today = datetime.now().strftime("%d.%m.%Y")
+    
+    if message.text == "✅ Буду":
+        user_id = message.from_user.id
+        update_attendance_in_excel(user_id, today, "✅")
+        await message.answer("👍 Отлично! Хороших пар! 📚", reply_markup=get_main_kb())
+        await state.clear()
+        return
+        
+    elif message.text == "❌ Не буду":
+        await message.answer(
+            "📅 Укажи дату отсутствия (ДД.ММ.ГГГГ):",
+            reply_markup=get_cancel_kb()
+        )
+        await state.set_state(AttendanceForm.waiting_for_date)
+        return
+        
+    elif message.text == "🚫 Отмена":
+        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
+        await state.clear()
+        return
+        
+    await message.answer("❓ Используй кнопки 👇", reply_markup=get_main_kb())
+
+@router.message(AttendanceForm.waiting_for_date)
+async def process_date(message: Message, state: FSMContext):
+    if message.text == "🚫 Отмена":
+        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
+        await state.clear()
+        return
+    
+    is_valid, result = validate_and_normalize_date(message.text)
+    if not is_valid:
+        await message.answer(f"❌ {result}\nПопробуй ещё:")
+        return
+    
+    await state.update_data(date=result)
+    await message.answer("✏️ Причина отсутствия? Напиши «-» если нет:", reply_markup=get_cancel_kb())
+    await state.set_state(AttendanceForm.waiting_for_reason)
+
+@router.message(AttendanceForm.waiting_for_reason)
+async def process_reason(message: Message, state: FSMContext):
+    if message.text == "🚫 Отмена":
+        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
+        await state.clear()
+        return
+    
+    reason = None if message.text.strip() in ["-", ""] else message.text.strip()
+    user_id = message.from_user.id
+    data = await state.get_data()
+    date = data['date']
+    
+    try:
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, username FROM users WHERE user_id = ?", (user_id,))
+        user_row = cursor.fetchone()
+        if not user_row:
+            conn.close()
+            await message.answer("❌ Ошибка: пользователь не найден в базе.")
+            await state.clear()
+            return
+        
+        user_name, user_username = user_row
+        cursor.execute("INSERT INTO absences (user_id, date, reason) VALUES (?, ?, ?)", (user_id, date, reason))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        await message.answer(f"❌ Ошибка сохранения: {e}")
+        await state.clear()
+        return
+    
+    update_attendance_in_excel(user_id, date, "❌", reason)
+    
+    username_display = f" (@{user_username})" if user_username else ""
+    reason_text = f"\n📝 Причина: {reason}" if reason else ""
+    await bot.send_message(
+        ADMIN_CHAT_ID,
+        f"⚠️ Отсутствие\n👤 {user_name}{username_display} (ID: {user_id})\n📅 {date}{reason_text}"
+    )
+    
+    await message.answer(f"✅ Записал отсутствие на {date}.", reply_markup=get_main_kb())
+    await state.clear()
+
+@router.message(AttendanceForm.waiting_for_start_date)
+async def process_start_date(message: Message, state: FSMContext):
+    if message.text == "🚫 Отмена":
+        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
+        await state.clear()
+        return
+    
+    is_valid, result = validate_and_normalize_date(message.text)
+    if not is_valid:
+        await message.answer(f"❌ {result}\nПопробуй ещё:")
+        return
+    
+    await state.update_data(start_date=result)
+    await message.answer(
+        "📅 Укажи дату окончания отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
+        reply_markup=get_cancel_kb()
+    )
+    await state.set_state(AttendanceForm.waiting_for_end_date)
+
+@router.message(AttendanceForm.waiting_for_end_date)
+async def process_end_date(message: Message, state: FSMContext):
+    if message.text == "🚫 Отмена":
+        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
+        await state.clear()
+        return
+    
+    is_valid, result = validate_and_normalize_date(message.text)
+    if not is_valid:
+        await message.answer(f"❌ {result}\nПопробуй ещё:")
+        return
+    
+    data = await state.get_data()
+    start_date = data['start_date']
+    
+    try:
+        start_dt = datetime.strptime(start_date, "%d.%m.%Y")
+        end_dt = datetime.strptime(result, "%d.%m.%Y")
+        if end_dt < start_dt:
+            await message.answer("❌ Дата окончания не может быть раньше даты начала!\nУкажи корректную дату окончания:")
+            return
+    except:
+        await message.answer("❌ Ошибка при сравнении дат. Попробуй ещё:")
+        return
+    
+    await state.update_data(end_date=result)
+    await message.answer("✏️ Укажи причину отсутствия (болезнь, отпуск и т.д.):", reply_markup=get_cancel_kb())
+    await state.set_state(AttendanceForm.waiting_for_absence_reason)
+
+@router.message(AttendanceForm.waiting_for_absence_reason)
+async def process_absence_reason(message: Message, state: FSMContext):
+    if message.text == "🚫 Отмена":
+        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
+        await state.clear()
+        return
+    
+    reason = message.text.strip()
+    user_id = message.from_user.id
+    data = await state.get_data()
+    start_date = data['start_date']
+    end_date = data['end_date']
+    
+    try:
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, username FROM users WHERE user_id = ?", (user_id,))
+        user_row = cursor.fetchone()
+        if not user_row:
+            conn.close()
+            await message.answer("❌ Ошибка: пользователь не найден в базе.")
+            await state.clear()
+            return
+        
+        user_name, user_username = user_row
+        cursor.execute(
+            "INSERT INTO absence_periods (user_id, start_date, end_date, reason) VALUES (?, ?, ?, ?)",
+            (user_id, start_date, end_date, reason)
+        )
+        conn.commit()
+        conn.close()
+        
+        date_range = get_date_range(
+            datetime.strptime(start_date, "%d.%m.%Y"),
+            datetime.strptime(end_date, "%d.%m.%Y")
+        )
+        
+        for date_str in date_range:
+            update_attendance_in_excel(user_id, date_str, "❌", reason)
+        
+        username_display = f" (@{user_username})" if user_username else ""
+        admin_message = (
+            f"📅 ПЕРИОД ОТСУТСТВИЯ\n\n"
+            f"👤 {user_name}{username_display} (ID: {user_id})\n"
+            f"📆 С {start_date} по {end_date}\n"
+            f"📝 Причина: {reason}"
+        )
+        await bot.send_message(ADMIN_CHAT_ID, admin_message)
+        
+        await message.answer(
+            f"✅ Записал период отсутствия:\n"
+            f"📆 С {start_date} по {end_date}\n"
+            f"📝 Причина: {reason}\n\n"
+            f"Бот не будет беспокоить вас в эти дни!",
+            reply_markup=get_main_kb()
+        )
+        await state.clear()
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка сохранения периода: {e}")
+        await state.clear()
 
 # ===== ФУНКЦИЯ ЕЖЕДНЕВНОГО НАПОМИНАНИЯ В 20:00 =====
 async def send_daily_reminder(bot: Bot):
@@ -813,7 +777,6 @@ async def send_daily_reminder(bot: Bot):
         success_count = 0
         
         for user_id, name, username in users:
-            # Проверяем, не находится ли пользователь в периоде отсутствия завтра
             if is_user_absent_today(user_id, tomorrow):
                 print(f"⏭️ Пропускаем пользователя {name} (ID: {user_id}) — в отпуске завтра")
                 continue
@@ -833,7 +796,7 @@ async def send_daily_reminder(bot: Bot):
             except (TelegramForbiddenError, TelegramAPIError):
                 continue
         
-        print(f"✅ Напоминание отправлено {success_count} пользователям (пропущено: {len(users) - success_count})")
+        print(f"✅ Напоминание отправлено {success_count} пользователям")
         
     except Exception as e:
         print(f"❌ Ошибка напоминания: {e}")
