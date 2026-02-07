@@ -361,7 +361,8 @@ async def cmd_help(message: Message):
         "/history — история отсутствий\n"
         "/absence — активные периоды отсутствия\n"
         "/clear_absence — удалить периоды\n"
-        "/journal — получить Excel-журнал (админ)\n\n"
+        "/journal — получить Excel-журнал (админ)\n"
+        "/support — поддержать разработчика ❤️\n\n"
         "📅 Учебные дни: понедельник-суббота"
     )
     await message.answer(help_text)
@@ -464,6 +465,20 @@ async def cmd_journal(message: Message):
         import traceback
         traceback.print_exc()
 
+# ===== НОВАЯ КОМАНДА ПОДДЕРЖКИ =====
+@router.message(Command("support"))
+async def cmd_support(message: Message):
+    """Команда для поддержки разработчика"""
+    support_text = (
+        "💝 Поддержать разработчика\n\n"
+        "Если бот помог вам — вы можете отблагодарить автора:\n\n"
+        "📧 Почта для связи: l1rtuswork09@gmail.com\n\n"
+        "💳 Ссылки для доната:\n"
+        "• DonationAlerts: https://www.donationalerts.com/r/lirtus\n"
+        "• YooMoney: https://yoomoney.ru/to/4100118522546322"
+    )
+    await message.answer(support_text)
+
 # ===== ХЕНДЛЕР /start (только при команде) =====
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
@@ -528,7 +543,7 @@ async def handle_buttons(message: Message, state: FSMContext):
             
         elif message.text == "📆 Отсутствую с... по...":
             await message.answer(
-                "📅 Укажи дату начала отсутствия (ДД.ММ.ГГГГ):",
+                "📅 Укажи дату начала отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
                 reply_markup=get_cancel_kb()
             )
             await state.set_state(AttendanceForm.waiting_for_start_date)
@@ -577,7 +592,7 @@ async def process_attendance(message: Message, state: FSMContext):
         
     elif message.text == "❌ Не буду":
         await message.answer(
-            "📅 Укажи дату отсутствия (ДД.ММ.ГГГГ):",
+            "📅 Укажи дату отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
             reply_markup=get_cancel_kb()
         )
         await state.set_state(AttendanceForm.waiting_for_date)
@@ -664,7 +679,7 @@ async def process_start_date(message: Message, state: FSMContext):
     
     await state.update_data(start_date=result)
     await message.answer(
-        "📅 Укажи дату окончания отсутствия (ДД.ММ.ГГГГ):",
+        "📅 Укажи дату окончания отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
         reply_markup=get_cancel_kb()
     )
     await state.set_state(AttendanceForm.waiting_for_end_date)
@@ -763,6 +778,31 @@ async def process_absence_reason(message: Message, state: FSMContext):
 # ===== ФУНКЦИЯ ЕЖЕДНЕВНОГО НАПОМИНАНИЯ В 20:00 =====
 async def send_daily_reminder(bot: Bot):
     try:
+        current_weekday = datetime.now().weekday()  # 0=пн, 6=вс
+        
+        # Определяем, за какой день спрашивать
+        days_to_ask = {
+            0: "вторник",      # Понедельник → завтра вторник
+            1: "среду",        # Вторник → завтра среда
+            2: "четверг",      # Среда → завтра четверг
+            3: "пятницу",      # Четверг → завтра пятница
+            4: "субботу",      # Пятница → завтра суббота
+            6: "понедельник"   # Воскресенье → завтра понедельник
+        }
+        
+        # Если сегодня суббота (5) — не отправляем напоминание
+        if current_weekday == 5:
+            print("⏭️ Сегодня суббота — напоминание не отправляется")
+            return
+            
+        # Если сегодня не в списке дней для опроса — выходим
+        if current_weekday not in days_to_ask:
+            print(f"⏭️ Сегодня {current_weekday}-й день недели — напоминание не требуется")
+            return
+        
+        day_name = days_to_ask[current_weekday]
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
+        
         conn = sqlite3.connect('attendance.db')
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, name, username FROM users")
@@ -773,10 +813,10 @@ async def send_daily_reminder(bot: Bot):
             print("📭 Нет зарегистрированных пользователей")
             return
         
-        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
         success_count = 0
         
         for user_id, name, username in users:
+            # Проверяем, не находится ли пользователь в периоде отсутствия завтра
             if is_user_absent_today(user_id, tomorrow):
                 print(f"⏭️ Пропускаем пользователя {name} (ID: {user_id}) — в отпуске завтра")
                 continue
@@ -785,7 +825,7 @@ async def send_daily_reminder(bot: Bot):
                 username_display = f" (@{username})" if username else ""
                 message_text = (
                     f"🌙 Вечернее напоминание\n\n"
-                    f"{name}{username_display}, будешь завтра на парах?\n\n"
+                    f"{name}{username_display}, будешь завтра ({day_name}) на парах?\n\n"
                     f"📅 Завтра: {tomorrow}"
                 )
                 
@@ -825,6 +865,7 @@ async def main():
         {"command": "clear_absence", "description": "Удалить периоды"},
         {"command": "help", "description": "Помощь"},
         {"command": "journal", "description": "Получить журнал (админ)"},
+        {"command": "support", "description": "Поддержать разработчика ❤️"},
     ])
     
     scheduler = AsyncIOScheduler(timezone=ZoneInfo("Europe/Moscow"))
