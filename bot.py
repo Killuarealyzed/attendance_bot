@@ -543,7 +543,7 @@ async def handle_buttons(message: Message, state: FSMContext):
             
         elif message.text == "📆 Отсутствую с... по...":
             await message.answer(
-                "📅 Укажи дату начала отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
+                "📅 Укажи дату начала отсутствия (ДД.ММ.ГГГГ):",
                 reply_markup=get_cancel_kb()
             )
             await state.set_state(AttendanceForm.waiting_for_start_date)
@@ -592,7 +592,7 @@ async def process_attendance(message: Message, state: FSMContext):
         
     elif message.text == "❌ Не буду":
         await message.answer(
-            "📅 Укажи дату отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
+            "📅 Укажи дату отсутствия (ДД.ММ.ГГГГ):",
             reply_markup=get_cancel_kb()
         )
         await state.set_state(AttendanceForm.waiting_for_date)
@@ -679,7 +679,7 @@ async def process_start_date(message: Message, state: FSMContext):
     
     await state.update_data(start_date=result)
     await message.answer(
-        "📅 Укажи дату окончания отсутствия (ДД.ММ или ДД.ММ.ГГГГ):",
+        "📅 Укажи дату окончания отсутствия (ДД.ММ.ГГГГ):",
         reply_markup=get_cancel_kb()
     )
     await state.set_state(AttendanceForm.waiting_for_end_date)
