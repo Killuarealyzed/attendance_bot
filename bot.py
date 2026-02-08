@@ -56,6 +56,7 @@ class AttendanceForm(StatesGroup):
     waiting_for_start_date = State()
     waiting_for_end_date = State()
     waiting_for_absence_reason = State()
+    waiting_for_duty_usernames = State()
 
 # ===== ФУНКЦИИ ДЛЯ РАБОТЫ С ДАТАМИ =====
 def get_weekdays(start_date: datetime, days_ahead: int = 30) -> list:
@@ -352,7 +353,7 @@ def is_user_absent_today(user_id: int, today: str) -> bool:
     except:
         return False
 
-# ===== ХЕНДЛЕРЫ КОМАНД (ОБЯЗАТЕЛЬНО В НАЧАЛЕ!) =====
+# ===== ХЕНДЛЕРЫ КОМАНД =====
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     help_text = (
@@ -361,6 +362,7 @@ async def cmd_help(message: Message):
         "/history — история отсутствий\n"
         "/absence — активные периоды отсутствия\n"
         "/clear_absence — удалить периоды\n"
+        "/duty — назначить дежурных (админ)\n"
         "/journal — получить Excel-журнал (админ)\n"
         "/support — поддержать разработчика ❤️\n\n"
         "📅 Учебные дни: понедельник-суббота"
@@ -465,13 +467,11 @@ async def cmd_journal(message: Message):
         import traceback
         traceback.print_exc()
 
-# ===== НОВАЯ КОМАНДА ПОДДЕРЖКИ =====
+# ===== КОМАНДА ПОДДЕРЖКИ =====
 @router.message(Command("support"))
 async def cmd_support(message: Message):
-    """Команда для поддержки разработчика"""
     support_text = (
         "💝 Поддержать разработчика\n\n"
-        "Если бот помог вам — вы можете отблагодарить автора:\n\n"
         "📧 Почта для связи: l1rtuswork09@gmail.com\n\n"
         "💳 Ссылки для доната:\n"
         "• DonationAlerts: https://www.donationalerts.com/r/lirtus\n"
@@ -479,7 +479,95 @@ async def cmd_support(message: Message):
     )
     await message.answer(support_text)
 
-# ===== ХЕНДЛЕР /start (только при команде) =====
+# ===== КОМАНДА НАЗНАЧЕНИЯ ДЕЖУРНЫХ =====
+@router.message(Command("duty"))
+async def cmd_duty(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_CHAT_ID:
+        await message.answer("❌ Эта команда только для админа!")
+        return
+    
+    await message.answer(
+        "👮‍♂️ Введите юзернеймы дежурных через пробел:\n\n"
+        "Пример: @lirtus @roma @ivan_petrov"
+    )
+    await state.set_state(AttendanceForm.waiting_for_duty_usernames)
+
+@router.message(AttendanceForm.waiting_for_duty_usernames)
+async def process_duty_usernames(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_CHAT_ID:
+        await message.answer("❌ Эта команда только для админа!")
+        return
+    
+    usernames_input = message.text.strip()
+    
+    if not usernames_input:
+        await message.answer("❌ Пустой ввод. Попробуйте снова:")
+        return
+    
+    input_usernames = [
+        uname.strip().lstrip('@') 
+        for uname in re.split(r'\s+', usernames_input) 
+        if uname.strip().lstrip('@')
+    ]
+    
+    if not input_usernames:
+        await message.answer("❌ Не найдено корректных юзернеймов. Попробуйте снова:")
+        return
+    
+    try:
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+        
+        assigned_users = []
+        not_found = []
+        
+        for username in input_usernames:
+            cursor.execute(
+                "SELECT user_id, name FROM users WHERE username = ?",
+                (username,)
+            )
+            result = cursor.fetchone()
+            
+            if result:
+                user_id, name = result
+                assigned_users.append((user_id, name, username))
+            else:
+                not_found.append(username)
+        
+        conn.close()
+        
+        success_count = 0
+        for user_id, name, username in assigned_users:
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"👮‍♂️ Вы назначены дежурным на сегодня!\n\n"
+                    f"Спасибо за помощь! 🙏"
+                )
+                success_count += 1
+            except Exception as e:
+                print(f"⚠️ Не удалось отправить сообщение {username}: {e}")
+        
+        response = "✅ Дежурные назначены!\n\n"
+        
+        if assigned_users:
+            response += "📨 Уведомления отправлены:\n"
+            for _, name, username in assigned_users:
+                response += f"• {name} (@{username})\n"
+        
+        if not_found:
+            response += "\n❌ Не найдены в базе:\n"
+            for username in not_found:
+                response += f"• @{username}\n"
+        
+        await message.answer(response)
+        await state.clear()
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при назначении дежурных: {e}")
+        await state.clear()
+
+# ===== ОСНОВНЫЕ ХЕНДЛЕРЫ =====
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -504,16 +592,15 @@ async def cmd_start(message: Message, state: FSMContext):
             f"👋 Привет, {user[0]}!\n\nВыбери действие:",
             reply_markup=get_main_kb()
         )
-        await state.clear()  # ← КРИТИЧЕСКИ ВАЖНО!
+        await state.clear()
     else:
         await message.answer("👋 Представься (ФИО или имя):", reply_markup=ReplyKeyboardRemove())
         await state.set_data({"username": username})
         await state.set_state(AttendanceForm.waiting_for_name)
 
-# ===== ГЛОБАЛЬНЫЙ ХЕНДЛЕР ДЛЯ КНОПОК (только если состояние пустое) =====
 @router.message(
     lambda message: message.text in ["📝 Отметиться", "📆 Отсутствую с... по..."],
-    StateFilter(None)  # ← Только если состояние не установлено
+    StateFilter(None)
 )
 async def handle_buttons(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -551,7 +638,6 @@ async def handle_buttons(message: Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
-# ===== ХЕНДЛЕРЫ FSM (обработка состояний) =====
 @router.message(AttendanceForm.waiting_for_name)
 async def process_name(message: Message, state: FSMContext):
     name = message.text.strip()
@@ -577,7 +663,7 @@ async def process_name(message: Message, state: FSMContext):
         f"✅ Привет, {name}!\n\nВыбери действие:",
         reply_markup=get_main_kb()
     )
-    await state.clear()  # ← Сбрасываем состояние после регистрации
+    await state.clear()
 
 @router.message(AttendanceForm.waiting_for_attendance)
 async def process_attendance(message: Message, state: FSMContext):
@@ -775,7 +861,7 @@ async def process_absence_reason(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка сохранения периода: {e}")
         await state.clear()
 
-# ===== ФУНКЦИЯ ЕЖЕДНЕВНОГО НАПОМИНАНИЯ В 20:00 =====
+# ===== ФУНКЦИЯ НАПОМИНАНИЯ В 20:00 =====
 async def send_daily_reminder(bot: Bot):
     try:
         current_weekday = datetime.now().weekday()  # 0=пн, 6=вс
@@ -795,7 +881,6 @@ async def send_daily_reminder(bot: Bot):
             print("⏭️ Сегодня суббота — напоминание не отправляется")
             return
             
-        # Если сегодня не в списке дней для опроса — выходим
         if current_weekday not in days_to_ask:
             print(f"⏭️ Сегодня {current_weekday}-й день недели — напоминание не требуется")
             return
@@ -863,6 +948,7 @@ async def main():
         {"command": "history", "description": "История отсутствий"},
         {"command": "absence", "description": "Периоды отсутствия"},
         {"command": "clear_absence", "description": "Удалить периоды"},
+        {"command": "duty", "description": "Назначить дежурных (админ)"},
         {"command": "help", "description": "Помощь"},
         {"command": "journal", "description": "Получить журнал (админ)"},
         {"command": "support", "description": "Поддержать разработчика ❤️"},
