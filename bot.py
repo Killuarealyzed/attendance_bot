@@ -5,13 +5,11 @@ import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-# ===== EXCEL ИНТЕГРАЦИЯ =====
 import pandas as pd
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-# ===== ПЛАНИРОВЩИК ЗАДАЧ =====
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from zoneinfo import ZoneInfo
@@ -24,7 +22,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramAPIError
 
-# ===== КОНСТАНТЫ =====
 EXCEL_FILE = "attendance_journal.xlsx"
 load_dotenv()
 
@@ -41,13 +38,11 @@ try:
 except ValueError:
     raise ValueError(f"❌ ОШИБКА: ADMIN_CHAT_ID должен быть числом, получено: '{ADMIN_CHAT_ID_RAW}'")
 
-# ===== ИНИЦИАЛИЗАЦИЯ БОТА =====
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
-# ===== FSM СОСТОЯНИЯ =====
 class AttendanceForm(StatesGroup):
     waiting_for_name = State()
     waiting_for_attendance = State()
@@ -57,20 +52,18 @@ class AttendanceForm(StatesGroup):
     waiting_for_end_date = State()
     waiting_for_absence_reason = State()
     waiting_for_duty_usernames = State()
+    waiting_for_new_name = State()
 
-# ===== ФУНКЦИИ ДЛЯ РАБОТЫ С ДАТАМИ =====
 def get_weekdays(start_date: datetime, days_ahead: int = 30) -> list:
-    """Генерирует список учебных дней (пн-сб)"""
     weekdays = []
     current_date = start_date
     for _ in range(days_ahead):
-        if current_date.weekday() < 6:  # пн-сб
+        if current_date.weekday() < 6:
             weekdays.append(current_date.strftime("%d.%m.%Y"))
         current_date += timedelta(days=1)
     return weekdays
 
 def parse_date(date_str: str) -> datetime:
-    """Преобразует строку ДД.ММ или ДД.ММ.ГГГГ в datetime"""
     parts = date_str.split('.')
     if len(parts) == 2:
         day, month = int(parts[0]), int(parts[1])
@@ -82,17 +75,15 @@ def parse_date(date_str: str) -> datetime:
     return datetime(year, month, day)
 
 def get_date_range(start_date: datetime, end_date: datetime) -> list:
-    """Возвращает все учебные дни в диапазоне [start_date, end_date]"""
     dates = []
     current = start_date
     while current <= end_date:
-        if current.weekday() < 6:  # пн-сб
+        if current.weekday() < 6:
             dates.append(current.strftime("%d.%m.%Y"))
         current += timedelta(days=1)
     return dates
 
 def ensure_dates_in_excel(ws, start_date: datetime = None, days_ahead: int = 30):
-    """Гарантирует наличие всех необходимых дат в Excel"""
     if start_date is None:
         start_date = datetime.now()
     
@@ -136,7 +127,6 @@ def ensure_dates_in_excel(ws, start_date: datetime = None, days_ahead: int = 30)
         print(f"✅ Добавлено {new_dates_added} новых учебных дат (пн-сб) в журнал")
     return new_dates_added
 
-# ===== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ =====
 def init_db():
     try:
         conn = sqlite3.connect('attendance.db')
@@ -186,9 +176,7 @@ def init_db():
         print(f"❌ Ошибка инициализации БД: {e}")
         raise
 
-# ===== EXCEL ФУНКЦИИ =====
 def init_excel():
-    """Создаёт Excel-файл с базовой структурой"""
     wb = Workbook()
     ws = wb.active
     ws.title = "Журнал посещаемости"
@@ -214,7 +202,6 @@ def init_excel():
     print(f"✅ Создан Excel-файл: {EXCEL_FILE}")
 
 def ensure_user_in_excel(user_id: int, name: str, username: str = None):
-    """Гарантирует, что пользователь есть в Excel."""
     try:
         if not os.path.exists(EXCEL_FILE):
             init_excel()
@@ -247,7 +234,6 @@ def ensure_user_in_excel(user_id: int, name: str, username: str = None):
         return False
 
 def update_attendance_in_excel(user_id: int, date_str: str, status: str, reason: str = None):
-    """Обновляет посещаемость в Excel."""
     try:
         conn = sqlite3.connect('attendance.db')
         cursor = conn.cursor()
@@ -308,7 +294,6 @@ def update_attendance_in_excel(user_id: int, date_str: str, status: str, reason:
         import traceback
         traceback.print_exc()
 
-# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 def get_main_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -338,7 +323,6 @@ def validate_and_normalize_date(date_str: str) -> tuple[bool, str]:
         return False, "Некорректная дата"
 
 def is_user_absent_today(user_id: int, today: str) -> bool:
-    """Проверяет, находится ли пользователь в периоде отсутствия сегодня"""
     try:
         conn = sqlite3.connect('attendance.db')
         cursor = conn.cursor()
@@ -353,12 +337,12 @@ def is_user_absent_today(user_id: int, today: str) -> bool:
     except:
         return False
 
-# ===== ХЕНДЛЕРЫ КОМАНД =====
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     help_text = (
         "ℹ️ Команды:\n"
         "/start — начать диалог\n"
+        "/rename — изменить имя\n"
         "/history — история отсутствий\n"
         "/absence — активные периоды отсутствия\n"
         "/clear_absence — удалить периоды\n"
@@ -368,6 +352,51 @@ async def cmd_help(message: Message):
         "📅 Учебные дни: понедельник-суббота"
     )
     await message.answer(help_text)
+
+@router.message(Command("rename"))
+async def cmd_rename(message: Message, state: FSMContext):
+    await message.answer(
+        "✏️ Введите новое имя:",
+        reply_markup=get_cancel_kb()
+    )
+    await state.set_state(AttendanceForm.waiting_for_new_name)
+
+@router.message(AttendanceForm.waiting_for_new_name)
+async def process_new_name(message: Message, state: FSMContext):
+    if message.text == "🚫 Отмена":
+        await message.answer("↩️ Отменено.", reply_markup=get_main_kb())
+        await state.clear()
+        return
+    
+    new_name = message.text.strip()
+    if len(new_name) < 2:
+        await message.answer("❌ Имя слишком короткое. Попробуй ещё раз:")
+        return
+    
+    user_id = message.from_user.id
+    username = message.from_user.username
+    
+    try:
+        conn = sqlite3.connect('attendance.db')
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET name = ?, username = ? WHERE user_id = ?",
+            (new_name, username, user_id)
+        )
+        conn.commit()
+        conn.close()
+        
+        ensure_user_in_excel(user_id, new_name, username)
+        
+        await message.answer(
+            f"✅ Имя успешно изменено на: {new_name}",
+            reply_markup=get_main_kb()
+        )
+        await state.clear()
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при смене имени: {e}")
+        await state.clear()
 
 @router.message(Command("history"))
 async def cmd_history(message: Message):
@@ -394,7 +423,6 @@ async def cmd_history(message: Message):
 
 @router.message(Command("absence"))
 async def cmd_absence(message: Message):
-    """Показывает активные периоды отсутствия пользователя"""
     user_id = message.from_user.id
     try:
         conn = sqlite3.connect('attendance.db')
@@ -424,7 +452,6 @@ async def cmd_absence(message: Message):
 
 @router.message(Command("clear_absence"))
 async def cmd_clear_absence(message: Message):
-    """Удаляет все активные периоды отсутствия пользователя"""
     user_id = message.from_user.id
     try:
         conn = sqlite3.connect('attendance.db')
@@ -467,7 +494,6 @@ async def cmd_journal(message: Message):
         import traceback
         traceback.print_exc()
 
-# ===== КОМАНДА ПОДДЕРЖКИ =====
 @router.message(Command("support"))
 async def cmd_support(message: Message):
     support_text = (
@@ -479,7 +505,6 @@ async def cmd_support(message: Message):
     )
     await message.answer(support_text)
 
-# ===== КОМАНДА НАЗНАЧЕНИЯ ДЕЖУРНЫХ =====
 @router.message(Command("duty"))
 async def cmd_duty(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_CHAT_ID:
@@ -567,7 +592,6 @@ async def process_duty_usernames(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка при назначении дежурных: {e}")
         await state.clear()
 
-# ===== ОСНОВНЫЕ ХЕНДЛЕРЫ =====
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -617,7 +641,7 @@ async def handle_buttons(message: Message, state: FSMContext):
             
         if message.text == "📝 Отметиться":
             await message.answer(
-                "Выбери свой статус на сегодня:",
+                "Выбери свой статус на завтра:",
                 reply_markup=ReplyKeyboardMarkup(
                     keyboard=[
                         [KeyboardButton(text="✅ Буду"), KeyboardButton(text="❌ Не буду")]
@@ -667,11 +691,15 @@ async def process_name(message: Message, state: FSMContext):
 
 @router.message(AttendanceForm.waiting_for_attendance)
 async def process_attendance(message: Message, state: FSMContext):
-    today = datetime.now().strftime("%d.%m.%Y")
+    current_weekday = datetime.now().weekday()
+    if current_weekday == 6:
+        target_date = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
+    else:
+        target_date = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
     
     if message.text == "✅ Буду":
         user_id = message.from_user.id
-        update_attendance_in_excel(user_id, today, "✅")
+        update_attendance_in_excel(user_id, target_date, "✅")
         await message.answer("👍 Отлично! Хороших пар! 📚", reply_markup=get_main_kb())
         await state.clear()
         return
@@ -861,22 +889,19 @@ async def process_absence_reason(message: Message, state: FSMContext):
         await message.answer(f"❌ Ошибка сохранения периода: {e}")
         await state.clear()
 
-# ===== ФУНКЦИЯ НАПОМИНАНИЯ В 20:00 =====
 async def send_daily_reminder(bot: Bot):
     try:
-        current_weekday = datetime.now().weekday()  # 0=пн, 6=вс
+        current_weekday = datetime.now().weekday()
         
-        # Определяем, за какой день спрашивать
         days_to_ask = {
-            0: "вторник",      # Понедельник → завтра вторник
-            1: "среду",        # Вторник → завтра среда
-            2: "четверг",      # Среда → завтра четверг
-            3: "пятницу",      # Четверг → завтра пятница
-            4: "субботу",      # Пятница → завтра суббота
-            6: "понедельник"   # Воскресенье → завтра понедельник
+            0: "вторник",
+            1: "среду",
+            2: "четверг",
+            3: "пятницу",
+            4: "субботу",
+            6: "понедельник"
         }
         
-        # Если сегодня суббота (5) — не отправляем напоминание
         if current_weekday == 5:
             print("⏭️ Сегодня суббота — напоминание не отправляется")
             return
@@ -901,7 +926,6 @@ async def send_daily_reminder(bot: Bot):
         success_count = 0
         
         for user_id, name, username in users:
-            # Проверяем, не находится ли пользователь в периоде отсутствия завтра
             if is_user_absent_today(user_id, tomorrow):
                 print(f"⏭️ Пропускаем пользователя {name} (ID: {user_id}) — в отпуске завтра")
                 continue
@@ -928,7 +952,6 @@ async def send_daily_reminder(bot: Bot):
         import traceback
         traceback.print_exc()
 
-# ===== ГЛАВНАЯ ФУНКЦИЯ =====
 async def main():
     print(f"🔧 Админский ID: {ADMIN_CHAT_ID}")
     print(f"🤖 Запуск бота...")
@@ -945,6 +968,7 @@ async def main():
     dp.include_router(router)
     await bot.set_my_commands([
         {"command": "start", "description": "Начать диалог"},
+        {"command": "rename", "description": "Изменить имя"},
         {"command": "history", "description": "История отсутствий"},
         {"command": "absence", "description": "Периоды отсутствия"},
         {"command": "clear_absence", "description": "Удалить периоды"},
